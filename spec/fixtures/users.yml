@@ -1,0 +1,11 @@
+david:
+  name: David
+  email: david@example.com
+  account: engineering
+  password_digest: "$2a$12$dummy.deterministic.digest.string"
+
+alice:
+  name: Alice
+  email: alice@example.com
+  account: marketing
+  password_digest: "$2a$12$dummy.deterministic.digest.string"

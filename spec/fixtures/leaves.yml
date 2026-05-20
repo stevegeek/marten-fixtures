@@ -1,0 +1,11 @@
+lead_welcome:
+  position: 1
+  leafable: welcome (Post)
+
+lead_kickoff:
+  position: 2
+  leafable: kickoff (Post)
+
+lead_important:
+  position: 3
+  leafable: important (Tag)
