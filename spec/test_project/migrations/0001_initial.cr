@@ -75,5 +75,12 @@ class Migration::MartenFixturesSpec::V0001 < Marten::Migration
       column :created_at, :date_time, null: false
       column :updated_at, :date_time, null: false
     end
+
+    create_table :coupons do
+      column :code, :string, max_size: 64, primary_key: true, null: false
+      column :name, :string, max_size: 255, null: false
+      column :created_at, :date_time, null: false
+      column :updated_at, :date_time, null: false
+    end
   end
 end
