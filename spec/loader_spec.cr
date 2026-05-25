@@ -117,7 +117,7 @@ describe MartenFixtures::Loader do
       extra_edges[Post] = [User] of Marten::DB::Model.class
 
       loader = MartenFixtures::Loader.new([] of Path)
-      ordered = loader.topo_sort_for_spec([User, Post, Account] of Marten::DB::Model.class, extra_edges)
+      ordered = loader._topo_sort_for_spec([User, Post, Account] of Marten::DB::Model.class, extra_edges)
 
       ordered.size.should eq(3)
       ordered.index!(Account).should be < ordered.index!(User)
@@ -137,7 +137,7 @@ describe MartenFixtures::Loader do
         MartenFixtures::Error,
         /Fixture model dependency cycle: (Account -> Extra -> Account|Extra -> Account -> Extra)/,
       ) do
-        loader.topo_sort_for_spec([Account, Extra] of Marten::DB::Model.class, extra_edges)
+        loader._topo_sort_for_spec([Account, Extra] of Marten::DB::Model.class, extra_edges)
       end
     end
 

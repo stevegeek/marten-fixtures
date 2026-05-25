@@ -1,0 +1,10 @@
+root:
+  name: Root
+
+middle:
+  name: Middle
+  parent: root
+
+leaf:
+  name: Leaf
+  parent: middle

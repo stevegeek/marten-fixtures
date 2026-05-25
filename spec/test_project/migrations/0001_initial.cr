@@ -67,5 +67,13 @@ class Migration::MartenFixturesSpec::V0001 < Marten::Migration
       column :created_at, :date_time, null: false
       column :updated_at, :date_time, null: false
     end
+
+    create_table :categories do
+      column :id, :big_int, primary_key: true, auto: true
+      column :name, :string, max_size: 255, null: false
+      column :parent_id, :reference, to_table: :categories, to_column: :id, null: true
+      column :created_at, :date_time, null: false
+      column :updated_at, :date_time, null: false
+    end
   end
 end

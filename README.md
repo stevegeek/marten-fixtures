@@ -144,8 +144,12 @@ uses the identical formula, so a fixture labelled `david` resolves to the same
 fixture file straight across: cross-fixture references and any hand-written
 foreign-key assertions still line up.
 
-UUID primary keys are derived via `UUID.v5` using the RFC 4122 DNS namespace
-(`6ba7b810-9dad-11d1-80b4-00c04fd430c8`) — again matching the Rails default.
+UUID primary keys are derived via `UUID.v5` using the RFC 4122 **OID** namespace
+(`6ba7b812-9dad-11d1-80b4-00c04fd430c8`) — matching Rails 7.x's
+`ActiveRecord::FixtureSet`, which calls
+`Digest::UUID.uuid_v5(Digest::UUID::OID_NAMESPACE, label)`. So a fixture
+labelled `david` on a UUID-pk model resolves to the same UUID string in
+both Rails and Marten test suites.
 
 ## Postgres setup
 
