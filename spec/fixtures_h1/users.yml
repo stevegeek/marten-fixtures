@@ -1,0 +1,6 @@
+david_explicit:
+  id: 999
+  name: David
+  email: david@example.com
+  account: engineering_explicit
+  password_digest: "$2a$12$dummy.deterministic.digest.string"

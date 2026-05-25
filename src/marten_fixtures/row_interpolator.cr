@@ -34,7 +34,7 @@ module MartenFixtures
           assign_relation(values, field, value)
         else
           next unless field.db_column?
-          values[field.db_column!] = field.to_db(yaml_to_native(value))
+          values[field.db_column!] = field.to_db(coerce_for_field(field, value))
         end
       end
 
@@ -44,10 +44,22 @@ module MartenFixtures
       values
     end
 
+    # L2: cap the "known fields" list to the first 20 entries (plus a
+    # "and N more" suffix). For wide models the unbounded list buried
+    # the misspelled-field signal in screens of column names; 20 is
+    # enough to spot the typo by eye, and the suffix preserves the
+    # signal that the model has more fields than the message shows.
+    KNOWN_FIELDS_SAMPLE = 20
+
     private def lookup_field(key : ::String) : Marten::DB::Field::Base
       @model_class.get_field(key)
     rescue Marten::DB::Errors::UnknownField
-      known = @model_class.fields.map(&.id).join(", ")
+      ids = @model_class.fields.map(&.id)
+      known = if ids.size > KNOWN_FIELDS_SAMPLE
+                "#{ids.first(KNOWN_FIELDS_SAMPLE).join(", ")} (and #{ids.size - KNOWN_FIELDS_SAMPLE} more)"
+              else
+                ids.join(", ")
+              end
       raise Error::UnknownField.new(
         "Unknown fixture field #{key.inspect} on #{@model_class.name}; known fields: #{known}"
       )
@@ -136,6 +148,155 @@ module MartenFixtures
 
     private def yaml_to_native(value : YAML::Any)
       value.raw
+    end
+
+    # H3: Marten's `Field::JSON#to_db`, `Field::Duration#to_db`, and
+    # `Field::Date#to_db` reject YAML's native union types. For each
+    # of those fields, convert the raw YAML value into the type the
+    # field expects:
+    #
+    # - JSON: serialise the raw value via `value.to_json` and parse back
+    #   into `JSON::Any`. This handles nested hashes / arrays / scalars
+    #   uniformly, including `nil`.
+    # - Duration: accept a numeric value as a count of seconds (the
+    #   most natural YAML literal) OR an ISO-8601-ish duration string
+    #   ("PT5M30S", "5m30s") parsed via `Time::Span` helpers.
+    # - Date: YAML date/datetime literals already parse to `Time`,
+    #   which `Field::Date#to_db` accepts. Strings that look like
+    #   ISO-8601 dates are parsed; everything else is handed to `to_db`
+    #   so the field's own validation surfaces a clear error.
+    private def coerce_for_field(field : Marten::DB::Field::Base, value : YAML::Any)
+      case field
+      when Marten::DB::Field::JSON
+        coerce_json(value)
+      when Marten::DB::Field::Duration
+        coerce_duration(value)
+      when Marten::DB::Field::Date
+        coerce_date(value)
+      else
+        yaml_to_native(value)
+      end
+    end
+
+    private def coerce_json(value : YAML::Any) : ::JSON::Any?
+      raw = value.raw
+      return nil if raw.nil?
+      ::JSON.parse(value.to_json)
+    end
+
+    private def coerce_duration(value : YAML::Any) : Time::Span?
+      raw = value.raw
+      case raw
+      when Nil
+        nil
+      when ::Int
+        Time::Span.new(seconds: raw.to_i64)
+      when ::Float
+        # Permit fractional seconds: 1.5 -> 1.5s.
+        Time::Span.new(nanoseconds: (raw * 1_000_000_000).to_i64)
+      when ::String
+        parse_duration_string(raw)
+      else
+        raise Error.new(
+          "Duration field #{field_label}: unsupported YAML value type #{raw.class} (#{raw.inspect}); " \
+          "supply a number of seconds or an ISO-8601-style string (e.g. \"PT5M30S\" or \"1h30m\")"
+        )
+      end
+    end
+
+    # Accepts ISO-8601 `PT…` durations and the common shorthand
+    # `Nh`/`Nm`/`Ns`/`Nms`/`Nus`/`Nns` (combinable, e.g. `1h30m15s`).
+    # A bare integer-or-float string is treated as a count of seconds.
+    private def parse_duration_string(raw : ::String) : Time::Span
+      trimmed = raw.strip
+      raise Error.new("Duration field #{field_label}: empty string") if trimmed.empty?
+
+      # Bare numeric → seconds.
+      if seconds_i = trimmed.to_i64?
+        return Time::Span.new(seconds: seconds_i)
+      end
+      if seconds_f = trimmed.to_f64?
+        return Time::Span.new(nanoseconds: (seconds_f * 1_000_000_000).to_i64)
+      end
+
+      iso_or_shorthand = trimmed
+      iso_or_shorthand = iso_or_shorthand[2..] if iso_or_shorthand.starts_with?("PT") || iso_or_shorthand.starts_with?("pt")
+      iso_or_shorthand = iso_or_shorthand[1..] if iso_or_shorthand.starts_with?("P") || iso_or_shorthand.starts_with?("p")
+
+      total = Time::Span.zero
+      remaining = iso_or_shorthand
+      # Order matters: 'ms' / 'us' / 'ns' must match before 'm' / 's'.
+      patterns = [
+        {/\A(\d+(?:\.\d+)?)ns/i, ->(v : Float64) { Time::Span.new(nanoseconds: v.to_i64) }},
+        {/\A(\d+(?:\.\d+)?)us/i, ->(v : Float64) { Time::Span.new(nanoseconds: (v * 1_000).to_i64) }},
+        {/\A(\d+(?:\.\d+)?)ms/i, ->(v : Float64) { Time::Span.new(nanoseconds: (v * 1_000_000).to_i64) }},
+        {/\A(\d+(?:\.\d+)?)h/i, ->(v : Float64) { Time::Span.new(nanoseconds: (v * 3_600 * 1_000_000_000).to_i64) }},
+        {/\A(\d+(?:\.\d+)?)m(?!s)/i, ->(v : Float64) { Time::Span.new(nanoseconds: (v * 60 * 1_000_000_000).to_i64) }},
+        {/\A(\d+(?:\.\d+)?)s/i, ->(v : Float64) { Time::Span.new(nanoseconds: (v * 1_000_000_000).to_i64) }},
+      ]
+
+      until remaining.empty?
+        matched = false
+        patterns.each do |(pattern, builder)|
+          if match = remaining.match(pattern)
+            total += builder.call(match[1].to_f64)
+            remaining = remaining[match[0].size..]
+            matched = true
+            break
+          end
+        end
+        unless matched
+          raise Error.new(
+            "Duration field #{field_label}: unparseable token #{remaining.inspect} in #{raw.inspect}; " \
+            "supported forms: seconds (number), ISO-8601 (\"PT5M30S\"), or shorthand (\"1h30m15s\")"
+          )
+        end
+      end
+
+      total
+    end
+
+    private def coerce_date(value : YAML::Any)
+      raw = value.raw
+      case raw
+      when Nil
+        nil
+      when Time
+        # YAML parses `2026-05-20` literals to `Time` already; `Field::Date#to_db`
+        # accepts Time. Pass through unchanged.
+        raw
+      when ::String
+        # Try ISO-8601 date / date-time parsing. Fall back to the raw
+        # value (which `to_db` will then reject with its own clear
+        # error) so we don't silently swallow malformed input here.
+        parsed = parse_date_string(raw)
+        parsed || raw
+      else
+        raw
+      end
+    end
+
+    private def parse_date_string(raw : ::String) : Time?
+      # Common, unambiguous shapes. Order matters: try the most
+      # specific first. `Time.parse` raises on failure; rescue silently
+      # because the caller falls back to handing the raw value to
+      # `to_db` (which produces its own descriptive error).
+      [
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+      ].each do |format|
+        begin
+          return Time.parse(raw, format, Time::Location::UTC)
+        rescue Time::Format::Error
+          next
+        end
+      end
+      nil
+    end
+
+    private def field_label : ::String
+      "#{@model_class.name}"
     end
   end
 end

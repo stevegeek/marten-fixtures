@@ -1,0 +1,60 @@
+nested_json:
+  name: nested
+  metadata:
+    nested:
+      key: value
+      count: 3
+      truthy: true
+      missing: null
+    list:
+      - 1
+      - "two"
+      - 3.14
+    bare_string: hi
+
+scalar_json_array:
+  name: array_only
+  metadata:
+    - one
+    - two
+    - three
+
+scalar_json_string:
+  name: string_only
+  metadata: just a string
+
+scalar_json_number:
+  name: number_only
+  metadata: 42
+
+scalar_json_bool:
+  name: bool_only
+  metadata: true
+
+scalar_json_null:
+  name: null_only
+  metadata: null
+
+duration_numeric:
+  name: duration_numeric_seconds
+  ttl: 90
+
+duration_iso:
+  name: duration_iso_string
+  ttl: "PT1H30M15S"
+
+duration_shorthand:
+  name: duration_shorthand
+  ttl: "1h30m"
+
+duration_fractional:
+  name: duration_fractional
+  ttl: 1.5
+
+date_yaml_literal:
+  name: date_literal
+  scheduled_on: 2026-05-20
+
+date_string:
+  name: date_string
+  scheduled_on: "2026-06-15"

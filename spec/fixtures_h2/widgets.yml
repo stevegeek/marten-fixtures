@@ -1,0 +1,6 @@
+complete:
+  name: Complete
+  note: This one has a note.
+
+minimal:
+  name: Minimal

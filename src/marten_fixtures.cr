@@ -18,12 +18,27 @@ module MartenFixtures
 
   @@configuration = Configuration.new
 
+  # Most recently populated label registry. Set by `Loader#load`; consulted by
+  # `Accessors#fixture` so that rows with explicit `id:` values are resolvable
+  # by label (H1 / L12). `nil` until the first load completes.
+  @@last_label_registry : LabelRegistry? = nil
+
   def self.configure(&) : Nil
     yield @@configuration
   end
 
   def self.configuration : Configuration
     @@configuration
+  end
+
+  # :nodoc:
+  def self.last_label_registry : LabelRegistry?
+    @@last_label_registry
+  end
+
+  # :nodoc:
+  def self.last_label_registry=(registry : LabelRegistry?)
+    @@last_label_registry = registry
   end
 
   def self.identify(label : String) : Int64

@@ -49,5 +49,23 @@ class Migration::MartenFixturesSpec::V0001 < Marten::Migration
       column :created_at, :date_time, null: false
       column :updated_at, :date_time, null: false
     end
+
+    create_table :samples do
+      column :id, :big_int, primary_key: true, auto: true
+      column :name, :string, max_size: 255, null: false
+      column :metadata, :json, null: true
+      column :ttl, :duration, null: true
+      column :scheduled_on, :date, null: true
+      column :created_at, :date_time, null: false
+      column :updated_at, :date_time, null: false
+    end
+
+    create_table :widgets do
+      column :id, :big_int, primary_key: true, auto: true
+      column :name, :string, max_size: 255, null: false
+      column :note, :string, max_size: 255, null: true
+      column :created_at, :date_time, null: false
+      column :updated_at, :date_time, null: false
+    end
   end
 end

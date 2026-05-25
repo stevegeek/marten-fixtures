@@ -23,6 +23,22 @@ module MartenFixtures
     @expanded_file_dirs : Array(Path)
     @expanded_configured_path : Path
 
+    # L8: every path-derived value (`@expanded_configured_path`,
+    # `@expanded_file_dirs`) is computed once at construction time
+    # using the CWD live at that instant. The `Configuration#fixtures_path`
+    # captured here is the value at construction time too — mutating
+    # `MartenFixtures.configuration.fixtures_path` (or the supplied
+    # `@config`) between `Loader.new` and `loader.load` does NOT
+    # change the path used for fixtures resolution or the `EvalContext`
+    # that helpers see. This is intentional: parallel test runners or
+    # programs that `Dir.cd` between construction and load would
+    # otherwise see CWD-corrupted paths.
+    #
+    # Other Configuration properties (`timestamp_policy`, `evaluator`,
+    # `disable_constraints`) are still read from `@config` at load time,
+    # so a quick mid-flight tweak of those WILL take effect. To pin a
+    # full Configuration snapshot, construct a fresh `Configuration`
+    # locally and pass it explicitly.
     def initialize(
       @files : Array(Path),
       @config : Configuration = MartenFixtures.configuration,
@@ -46,6 +62,10 @@ module MartenFixtures
     def load : Nil
       pass_one_register_labels
       pass_two_interpolate_and_insert
+      # Publish the populated registry so spec-side `Accessors#fixture`
+      # can resolve explicit-`id:` rows (H1 / L12). Last load wins; tests
+      # that load fresh fixtures per example reset on the next `load`.
+      MartenFixtures.last_label_registry = @label_registry
     end
 
     private def pass_one_register_labels : Nil
@@ -54,14 +74,79 @@ module MartenFixtures
         rows = parse_rows(raw, path)
         fixture_file = FixtureFile.new(path, @models)
         pk_field = fixture_file.model_class.fields.find!(&.primary_key?)
+        pk_column = pk_field.db_column!
 
-        rows.each_key do |label|
-          pk = Label.identify(label, pk_field)
+        rows.each do |label, attrs|
+          # H1: when the YAML row provides an explicit PK value (e.g.
+          # `id: 999`), register THAT value as the label's PK so that
+          # cross-fixture FK references via the label resolve to the
+          # explicit value (not the CRC32-derived placeholder). The
+          # explicit-PK contract is: an explicit `id:` value is preserved
+          # at insert time AND used as the FK target for label references.
+          explicit_pk = explicit_pk_for(attrs, pk_field, pk_column)
+          pk = explicit_pk || Label.identify(label, pk_field)
           @label_registry.register(fixture_file.model_class, label, pk)
         end
 
         @parsed << {file: fixture_file, raw: raw, rows: rows}
       end
+    end
+
+    # H1: returns an explicit PK from the YAML row's `<pk_column>` key if
+    # present (typically `id:`), coerced into the union expected by the
+    # label registry. Returns `nil` if the row doesn't carry an explicit
+    # PK (the common case — the loader will derive one from `Label.identify`).
+    private def explicit_pk_for(
+      attrs : Hash(String, YAML::Any),
+      pk_field : Marten::DB::Field::Base,
+      pk_column : String,
+    ) : (Int64 | String)?
+      explicit = attrs[pk_column]?
+      return nil if explicit.nil?
+
+      raw = explicit.raw
+      case raw
+      when Nil
+        nil
+      when ::Int
+        raw.to_i64.as(Int64 | String)
+      when ::String
+        if pk_field.is_a?(Marten::DB::Field::UUID)
+          raw.as(Int64 | String)
+        elsif integer_pk_field?(pk_field)
+          # Integer PK field — allow YAML strings that parse as integers
+          # (e.g. `id: "42"`) so an over-quoted YAML literal still maps
+          # correctly to the underlying Int64 column.
+          if as_int = raw.to_i64?
+            as_int.as(Int64 | String)
+          else
+            raise Error.new(
+              "Explicit primary key #{raw.inspect} on integer-PK field #{pk_field.id} " \
+              "must be parseable as Int64; got a String that #{raw.inspect}.to_i64? returned nil for."
+            )
+          end
+        else
+          # MFR5: String-PK fields (non-UUID) preserve the YAML string
+          # verbatim. Pre-fix the loader unconditionally `to_i64?`-coerced
+          # integer-looking strings, so `id: "42"` on a `:string` PK column
+          # was silently stored as `42_i64` and mismatched the column type.
+          # The label registry and the row inserter both round-trip the
+          # value as-is from here on.
+          raw.as(Int64 | String)
+        end
+      else
+        raise Error.new(
+          "Explicit primary key #{raw.inspect} on row in #{pk_field.id} must be an integer or string"
+        )
+      end
+    end
+
+    # MFR5: integer PK field? Marten's integer field hierarchy is
+    # `BigInt` (the standard auto-PK choice) and `Int` (32-bit). Both
+    # back an Int64-castable column, so we coerce integer-looking
+    # strings on both. UUID and String PKs are handled in the caller.
+    private def integer_pk_field?(pk_field : Marten::DB::Field::Base) : Bool
+      pk_field.is_a?(Marten::DB::Field::BigInt) || pk_field.is_a?(Marten::DB::Field::Int)
     end
 
     private def pass_two_interpolate_and_insert : Nil
@@ -76,7 +161,17 @@ module MartenFixtures
           @config.timestamp_policy,
         )
 
-        rendered_rows.each do |label, raw_attrs|
+        # L4: when the file's model has a self-FK (ManyToOne/OneToOne
+        # → itself), within-file row order matters: a child row whose
+        # parent ref points at a sibling label that appears later in
+        # the YAML would FK-violate on Postgres (and silently orphan on
+        # SQLite, where FKs aren't enforced). Topo-sort the rows by
+        # self-FK dependency before interpolating so parent rows always
+        # precede children, regardless of the order they were typed
+        # into the YAML.
+        ordered_rows = topo_sort_rows_for_self_fk(entry[:file].model_class, rendered_rows)
+
+        ordered_rows.each do |label, raw_attrs|
           row = interpolator.interpolate(label, raw_attrs)
           rows_by_model[entry[:file].model_class] ||= [] of Hash(String, ::DB::Any)
           rows_by_model[entry[:file].model_class] << row
@@ -90,7 +185,18 @@ module MartenFixtures
       ordered.each { |model| sorted_rows[model] = rows_by_model[model] }
 
       connection = Marten::DB::Connection.default
-      Inserter.new(connection).insert_all(sorted_rows)
+      # MFR2: pass `@config` through so the Inserter consults the *loader's*
+      # Configuration (not the module-global) for `disable_constraints?` —
+      # restoring the documented per-loader override contract.
+      # MFR1 / MFR4: routed through `build_inserter` so spec subclasses
+      # can return a spy `Inserter` and assert on the SET / bulk_insert
+      # call order without monkey-patching the production code path.
+      build_inserter(connection).insert_all(sorted_rows)
+    end
+
+    # :nodoc:
+    protected def build_inserter(connection : Marten::DB::Connection::Base) : Inserter
+      Inserter.new(connection, @config)
     end
 
     # Test-only hook to invoke the private topological sort with a
@@ -99,8 +205,14 @@ module MartenFixtures
     # `extra_edges` lets a spec inject `model -> dep` edges that aren't
     # present in the real `deps_for` output.
     #
+    # L10: the leading underscore is the Crystal community convention
+    # for "really internal, do not call from non-test code." Combined
+    # with `:nodoc:` (hides from API doc tools) and the explicit
+    # docstring, an accidental host-side call now stands out at the
+    # call site.
+    #
     # :nodoc:
-    def topo_sort_for_spec(
+    def _topo_sort_for_spec(
       models : Array(Marten::DB::Model.class),
       extra_edges : Hash(Marten::DB::Model.class, Array(Marten::DB::Model.class)) = {} of Marten::DB::Model.class => Array(Marten::DB::Model.class),
     ) : Array(Marten::DB::Model.class)
@@ -127,7 +239,6 @@ module MartenFixtures
     private def topo_sort_models(
       models : Array(Marten::DB::Model.class),
     ) : Array(Marten::DB::Model.class)
-      model_set = models.to_set
       dependencies = {} of Marten::DB::Model.class => Set(Marten::DB::Model.class)
       # `dependents` uses Set, not Array — a model with two FKs to the
       # same parent (e.g. `created_by`, `updated_by` → User) must NOT
@@ -143,9 +254,12 @@ module MartenFixtures
 
       models.each do |model|
         deps_for(model).each do |dep|
-          # Only track dependencies within the current load set; FKs to
-          # models not being loaded here are externally satisfied.
-          next unless model_set.includes?(dep)
+          # L11: `dependencies.has_key?(dep)` is the membership probe;
+          # we no longer pre-allocate a separate `model_set = models.to_set`
+          # because the hash we just built (keyed by the same models)
+          # already gives us O(1) lookup. Saves one Set allocation per
+          # load (small, but trivially worth it).
+          next unless dependencies.has_key?(dep)
           next if dep == model
           dependencies[model] << dep
           dependents[dep] << model
@@ -218,21 +332,118 @@ module MartenFixtures
     ) : Array(Marten::DB::Model.class)?
       path << node
       on_stack << node
-
-      dependencies[node].each do |dep|
-        next unless restrict_to.includes?(dep)
-        if on_stack.includes?(dep)
-          start_index = path.index!(dep)
-          return path[start_index..] + [dep]
+      # L7: belt-and-suspenders cleanup. The current single-call usage
+      # in `find_cycle` propagates the discovered cycle straight up the
+      # stack and abandons the search, so a "dirty" `path`/`on_stack`
+      # never had a visible effect. The `ensure` exists so that a
+      # future caller invoking `dfs_for_cycle` repeatedly with the same
+      # accumulators (or wrapping it in a continuation-style search)
+      # can't accidentally inherit stale state.
+      cycle : Array(Marten::DB::Model.class)? = nil
+      begin
+        dependencies[node].each do |dep|
+          next unless restrict_to.includes?(dep)
+          if on_stack.includes?(dep)
+            start_index = path.index!(dep)
+            cycle = path[start_index..] + [dep]
+            break
+          end
+          next if path.includes?(dep)
+          result = dfs_for_cycle(dep, dependencies, path, on_stack, restrict_to)
+          if result
+            cycle = result
+            break
+          end
         end
-        next if path.includes?(dep)
-        result = dfs_for_cycle(dep, dependencies, path, on_stack, restrict_to)
-        return result if result
+        cycle
+      ensure
+        on_stack.delete(node)
+        path.pop
+      end
+    end
+
+    # L4: returns the rows of `rendered_rows` in self-FK-dependency order.
+    # If the model has no self-FK fields, the input is returned unchanged
+    # (preserving YAML order). Otherwise, builds a row-level dep graph
+    # (row B depends on row A if B's self-FK column references the label
+    # of row A) and Kahn-sorts. A cycle (e.g. A.parent=B, B.parent=A)
+    # raises with the cycle path so the author gets a clear error
+    # instead of a silent DB-level failure.
+    private def topo_sort_rows_for_self_fk(
+      model_class : Marten::DB::Model.class,
+      rendered_rows : Hash(String, Hash(String, YAML::Any)),
+    ) : Array({String, Hash(String, YAML::Any)})
+      self_fk_field_ids = self_fk_field_ids_for(model_class)
+      original = rendered_rows.to_a
+      return original if self_fk_field_ids.empty?
+
+      label_set = rendered_rows.keys.to_set
+      dependencies = {} of String => Set(String)
+      dependents = {} of String => Set(String)
+      rendered_rows.each_key do |label|
+        dependencies[label] = Set(String).new
+        dependents[label] = Set(String).new
       end
 
-      on_stack.delete(node)
-      path.pop
-      nil
+      rendered_rows.each do |label, attrs|
+        self_fk_field_ids.each do |key|
+          ref = attrs[key]?
+          next if ref.nil?
+          raw = ref.raw
+          next unless raw.is_a?(::String)
+          # Only treat the value as a within-file label ref when there
+          # actually IS a sibling row by that name. (A self-FK can also
+          # legitimately reference a row that's already in the DB from
+          # a prior load, in which case we leave the order alone.)
+          next unless label_set.includes?(raw)
+          next if raw == label
+          dependencies[label] << raw
+          dependents[raw] << label
+        end
+      end
+
+      ready = original.select { |(label, _)| dependencies[label].empty? }.map(&.[0])
+      label_order = [] of String
+      until ready.empty?
+        current = ready.shift
+        label_order << current
+        dependents[current].each do |child|
+          dependencies[child].delete(current)
+          ready << child if dependencies[child].empty?
+        end
+      end
+
+      if label_order.size != rendered_rows.size
+        unsorted = rendered_rows.keys.reject { |label| label_order.includes?(label) }
+        raise Error.new(
+          "Self-FK cycle within #{model_class.name} fixture rows among: " \
+          "#{unsorted.join(", ")}. Self-FK references must form an acyclic graph " \
+          "(parent rows must precede children in the dependency sense, not the " \
+          "YAML-file sense)."
+        )
+      end
+
+      label_order.map { |label| {label, rendered_rows[label]} }
+    end
+
+    # Returns every YAML key that could carry a self-FK reference for
+    # the given model — both the relation name (`parent`) and the
+    # underlying column id (`parent_id`). Fixture YAML by convention
+    # uses the relation name (so a row reads `parent: root` rather
+    # than `parent_id: root`), but we also accept the id form so a
+    # YAML file that's already been mechanically translated still
+    # gets the within-file sort.
+    private def self_fk_field_ids_for(model_class : Marten::DB::Model.class) : Array(String)
+      keys = [] of String
+      model_class.fields.each do |field|
+        case field
+        when Marten::DB::Field::ManyToOne, Marten::DB::Field::OneToOne
+          next unless field.related_model == model_class
+          keys << field.relation_name
+          keys << field.id unless field.id == field.relation_name
+        end
+      end
+      keys
     end
 
     private def deps_for(model : Marten::DB::Model.class) : Array(Marten::DB::Model.class)
@@ -289,6 +500,17 @@ module MartenFixtures
 
     private def evaluator_for(label_registry : LabelRegistry) : Evaluator
       if existing = @config.evaluator
+        # L6: when the host pre-configured a `CrinjaEvaluator` (e.g. so
+        # they could swap in a non-global HelperRegistry), the Loader
+        # injects a live EvalContext into it via the setter. Without
+        # this, the evaluator's helper procs would raise the "EvalContext
+        # with a loaded label registry" error on first invocation
+        # because the pre-construction-time context was nil. Other
+        # evaluator types (e.g. PlainEvaluator, a user's custom
+        # implementation) are left untouched.
+        if existing.is_a?(CrinjaEvaluator)
+          existing.eval_context = EvalContext.new(eval_context_path, label_registry)
+        end
         return existing
       end
 
@@ -318,11 +540,18 @@ module MartenFixtures
       return @expanded_configured_path if under_configured
 
       lca = least_common_ancestor(@expanded_file_dirs)
-      STDERR.puts(
-        "[marten-fixtures] warning: loaded files span multiple directories " \
+      # M6: route the warning through Marten's central `Log` so test
+      # runners that fail on stderr writes don't misclassify the benign
+      # multi-dir notification. Hosts can adjust verbosity via
+      # `Marten.settings.log_level` or scope a per-source filter to
+      # the `marten` logger source (we don't `.for("marten-fixtures")`
+      # to keep the namespace shallow — the message body already
+      # carries the `[marten-fixtures]` prefix for grep-ability).
+      Marten::Log.warn do
+        "[marten-fixtures] loaded files span multiple directories " \
         "(#{@expanded_file_dirs.map(&.to_s).join(", ")}); EvalContext.fixtures_path " \
         "falls back to least-common-ancestor #{lca}"
-      )
+      end
       lca
     end
 
@@ -344,11 +573,27 @@ module MartenFixtures
       source.includes?("{{") || source.includes?("{%")
     end
 
+    # L3: memoised on the class so that test suites with a
+    # `before_each` `Loader.new(...).load` don't re-walk every app's
+    # model list on every example. The list is invariant at runtime
+    # (Marten apps load at boot), so caching is safe; `clear_model_cache!`
+    # exists for the rare test case that wants to confirm a custom
+    # `Marten.apps` configuration is picked up after spec-level mutation.
+    @@all_models : Array(Marten::DB::Model.class)? = nil
+
+    # :nodoc:
+    def self.clear_model_cache! : Nil
+      @@all_models = nil
+    end
+
     private def collect_models : Array(Marten::DB::Model.class)
+      cached = @@all_models
+      return cached if cached
       models = [] of Marten::DB::Model.class
       Marten.apps.app_configs.each do |app_config|
         app_config.models.each { |model| models << model }
       end
+      @@all_models = models
       models
     end
   end
