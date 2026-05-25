@@ -41,6 +41,12 @@ Spec.before_each do
     c.fixtures_path = Path["spec/fixtures"]
     c.timestamp_policy = :auto
     c.evaluator = nil
+    c.disable_constraints = true
   end
   MartenFixtures::HelperRegistry.reset_global!
+  # MFR6: clear the cross-test-leakable `@@last_label_registry` so a spec
+  # that asserts `MartenFixtures.last_label_registry.nil?` (or that needs
+  # a clean baseline before its own `load`) is not poisoned by the
+  # previous example's load.
+  MartenFixtures.last_label_registry = nil
 end
