@@ -13,8 +13,8 @@ and no human has reviewed the code. Statement made by: Stephen Ierodiaconou.**
 
 ## Notes
 
-marten-fixtures provides Rails-style YAML fixtures for Marten. It was vibe-
-coded: the idea was mine, and an AI planned it, wrote it, tested it and
+marten-fixtures provides Rails-style YAML fixtures for Marten. It was
+vibe-coded: the idea was mine, and an AI planned it, wrote it, tested it and
 security-checked it. No human has reviewed the code, which is what `unexamined`
 means.
 
