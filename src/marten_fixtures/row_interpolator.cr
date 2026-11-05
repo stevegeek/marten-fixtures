@@ -180,7 +180,7 @@ module MartenFixtures
 
     private def coerce_json(value : YAML::Any) : ::JSON::Any?
       raw = value.raw
-      return nil if raw.nil?
+      return if raw.nil?
       ::JSON.parse(value.to_json)
     end
 
@@ -286,11 +286,9 @@ module MartenFixtures
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d",
       ].each do |format|
-        begin
-          return Time.parse(raw, format, Time::Location::UTC)
-        rescue Time::Format::Error
-          next
-        end
+        return Time.parse(raw, format, Time::Location::UTC)
+      rescue Time::Format::Error
+        next
       end
       nil
     end

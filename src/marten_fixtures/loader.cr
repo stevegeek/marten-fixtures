@@ -102,7 +102,7 @@ module MartenFixtures
       pk_column : String,
     ) : (Int64 | String)?
       explicit = attrs[pk_column]?
-      return nil if explicit.nil?
+      return if explicit.nil?
 
       raw = explicit.raw
       case raw

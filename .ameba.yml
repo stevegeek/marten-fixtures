@@ -9,3 +9,9 @@ Lint/NotNil:
 Style/HeredocIndent:
   Excluded:
     - spec/**
+
+# spec/test_project/ is the specs' Marten test app (models, migrations), not
+# specs; renaming its files to *_spec.cr would make `crystal spec` run them.
+Lint/SpecFilename:
+  Excluded:
+    - spec/test_project/**/*.cr
