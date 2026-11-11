@@ -132,10 +132,10 @@ module MartenFixtures
     # missing from a row is a real fixture-authoring bug.
     private def default_fill_for(model : Marten::DB::Model.class, column : String) : ::DB::Any
       field = model.fields.find { |fld| fld.db_column? && fld.db_column! == column }
-      return nil unless field
+      return unless field
 
       default_value = field.default
-      return nil if default_value.nil?
+      return if default_value.nil?
 
       field.to_db(default_value)
     end
