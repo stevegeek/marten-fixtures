@@ -4,6 +4,10 @@ version: 0.1.0
 authors:
   - Stephen Ierodiaconou <stevegeek@gmail.com>
 
+targets:
+  ameba:
+    main: lib/ameba/bin/ameba.cr
+
 crystal: '>= 1.20.1'
 
 license: MIT
@@ -17,3 +21,6 @@ dependencies:
 development_dependencies:
   sqlite3:
     github: crystal-lang/crystal-sqlite3
+  ameba:
+    github: crystal-ameba/ameba
+    version: ~> 1.7.0
